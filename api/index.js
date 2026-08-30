@@ -45,6 +45,41 @@ async function getSheetMembers() {
     }
 }
 
+// Helper to send a Direct Message to a Discord user
+async function sendDirectMessage(userId, messageContent) {
+    try {
+        const token = process.env.DISCORD_TOKEN;
+        if (!token) return;
+
+        // 1. Create a DM channel with the user
+        const channelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bot ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ recipient_id: userId })
+        });
+        
+        const channelData = await channelRes.json();
+        if (!channelData.id) return;
+
+        // 2. Send the message to that DM channel
+        await fetch(`https://discord.com/api/v10/channels/${channelData.id}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bot ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                content: messageContent
+            })
+        });
+    } catch (error) {
+        console.error('Error sending DM:', error);
+    }
+}
+
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
         return res.status(405).send({ error: 'Method not allowed' });
@@ -108,11 +143,19 @@ export default async function handler(req, res) {
                 responseMessage = `❌ **Verification Failed.** The name **"${userInput}"** could not be found on the official DL Clan roster.`;
             }
 
+            // Grab the user ID safely from either member or user object
+            const userId = interaction.member?.user?.id || interaction.user?.id;
+            if (userId) {
+                // Send the verification result to their DMs asynchronously
+                sendDirectMessage(userId, responseMessage);
+            }
+
+            // Acknowledge the modal submission to Discord cleanly (ephemeral confirmation in channel)
             return res.status(200).send({
-                type: 4, // Channel message with source
+                type: 4, 
                 data: {
-                    content: responseMessage,
-                    flags: 64, // Ephemeral (only the user sees it)
+                    content: "📬 Your verification result has been sent to your **Direct Messages**!",
+                    flags: 64, // Ephemeral
                 },
             });
         }
