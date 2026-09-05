@@ -1,120 +1,68 @@
-import { google } from 'googleapis';
-import { verifyKey } from 'discord-interactions';
+const { Client, GatewayIntentBits } = require('discord.js');
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
 
-export const config = {
-    api: {
-        bodyParser: false,
-    },
-};
+// Import your service account credentials JSON file
+const creds = require('./credentials.json'); 
 
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const RANGE = 'Members!A2:D';
+// Authenticate using Google Auth Library
+const serviceAccountAuth = new JWT({
+    email: creds.client_email,
+    key: creds.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
 
-async function getRawBody(req) {
-    return new Promise((resolve, reject) => {
-        let data = '';
-        req.on('data', chunk => { data += chunk; });
-        req.on('end', () => { resolve(data); });
-        req.on('error', err => { reject(err); });
-    });
-}
+// Initialize Google Sheet ID (Found in your Sheet URL between /d/ and /edit)
+const doc = new GoogleSpreadsheet('YOUR_SHEET_ID_HERE', serviceAccountAuth);
 
-async function getSheetMembers() {
-    try {
-        const auth = new google.auth.GoogleAuth({
-            credentials: {
-                client_email: process.env.GOOGLE_CLIENT_EMAIL,
-                private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            },
-            scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-        });
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
+});
 
-        const sheets = google.sheets({ version: 'v4', auth });
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SPREADSHEET_ID,
-            range: RANGE,
-        });
+client.once('ready', () => {
+    console.log(`Bot logged in as ${client.user.tag}`);
+});
 
-        return response.data.values || [];
-    } catch (error) {
-        console.error('Error fetching Google Sheet:', error);
-        return [];
-    }
-}
+client.on('messageCreate', async (message) => {
+    // Ignore bot messages
+    if (message.author.bot) return;
 
-export default async function handler(req, res) {
-    if (req.method !== 'POST') {
-        return res.status(405).send({ error: 'Method not allowed' });
-    }
+    // Command structure: !device DL_AM
+    if (message.content.startsWith('!device')) {
+        const args = message.content.split(' ');
+        const targetName = args[1];
 
-    try {
-        const rawBody = await getRawBody(req);
-        const signature = req.headers['x-signature-ed25519'];
-        const timestamp = req.headers['x-signature-timestamp'];
-
-        const isVerified = verifyKey(rawBody, signature, timestamp, process.env.DISCORD_PUBLIC_KEY);
-        if (!isVerified) {
-            return res.status(401).send({ error: 'Invalid request signature' });
+        if (!targetName) {
+            return message.reply('Please provide a name. Example: `!device DL_AM`');
         }
 
-        const interaction = JSON.parse(rawBody);
+        try {
+            // Load document properties and worksheets
+            await doc.loadInfo();
+            const sheet = doc.sheetsByIndex[0];
+            const rows = await sheet.getRows();
 
-        if (interaction.type === 1) {
-            return res.status(200).send({ type: 1 }); // PONG
-        }
+            // Find user in Column A (Name)
+            const row = rows.find(r => r.get('Name')?.toLowerCase() === targetName.toLowerCase());
 
-        if (interaction.type === 2 && interaction.data.name === 'verify') {
-            return res.status(200).send({
-                type: 9, // Modal
-                data: {
-                    custom_id: 'verify_modal',
-                    title: 'DL Clan Player Verification',
-                    components: [
-                        {
-                            type: 1,
-                            components: [
-                                {
-                                    type: 4,
-                                    custom_id: 'display_name_input',
-                                    label: 'Enter your real display name:',
-                                    style: 1,
-                                    placeholder: 'e.g., DL_AM',
-                                    required: true,
-                                },
-                            ],
-                        },
-                    ],
-                },
-            });
-        }
-
-        if (interaction.type === 5 && interaction.data.custom_id === 'verify_modal') {
-            const userInput = interaction.data.components[0].components[0].value.trim();
-            const rows = await getSheetMembers();
-
-            const matchedMember = rows.find(row => row[0] && row[0].toLowerCase() === userInput.toLowerCase());
-
-            let responseMessage = '';
-            if (matchedMember) {
-                const [name, role, device] = matchedMember;
-                responseMessage = `✅ **Verification Successful!**\nWelcome, **${name}**!\n- **Role:** ${role}\n- **Device:** ${device}`;
+            if (row) {
+                // Get value from Column D (Device)
+                const device = row.get('Device') || 'N/A'; 
+                const name = row.get('Name');
+                
+                message.reply(`📱 **${name}** plays on: **${device}**`);
             } else {
-                responseMessage = `❌ **Verification Failed.** The name **"${userInput}"** could not be found on the official DL Clan roster.`;
+                message.reply(`❌ Could not find user **${targetName}** in the sheet.`);
             }
-
-            // Send response directly back to the user securely and instantly
-            return res.status(200).send({
-                type: 4,
-                data: {
-                    content: responseMessage,
-                    flags: 64, // Ephemeral (only they see it, clean and instant)
-                },
-            });
+        } catch (error) {
+            console.error(error);
+            message.reply('There was an error reading the Google Sheet.');
         }
-
-        return res.status(400).send({ error: 'Unknown interaction' });
-    } catch (error) {
-        console.error('Server error:', error);
-        return res.status(500).send({ error: 'Internal server error' });
     }
-}
+});
+
+client.login('YOUR_DISCORD_BOT_TOKEN');
