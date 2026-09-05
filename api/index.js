@@ -1,16 +1,24 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
-const creds = require('./credentials.json'); 
+// Load Google Service Account Credentials
+const creds = require('./credentials.json');
 
+// Setup Google Sheets Auth
 const serviceAccountAuth = new JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
-const doc = new GoogleSpreadsheet('YOUR_SHEET_ID_HERE', serviceAccountAuth);
+// Replace with your Google Sheet ID (from the URL)
+const SHEET_ID = 'YOUR_GOOGLE_SHEET_ID_HERE';
+const doc = new GoogleSpreadsheet(SHEET_ID, serviceAccountAuth);
+
+// Replace with your Bot Token and Client ID
+const BOT_TOKEN = 'YOUR_DISCORD_BOT_TOKEN_HERE';
+const CLIENT_ID = 'YOUR_DISCORD_CLIENT_ID_HERE';
 
 const client = new Client({
     intents: [
@@ -20,64 +28,73 @@ const client = new Client({
     ]
 });
 
-// Register Slash Command
+// Define Slash Command
 const commands = [
     new SlashCommandBuilder()
         .setName('verify')
-        .setDescription('Fetch device info for a user from Google Sheets')
+        .setDescription('Verify user and fetch device info from Google Sheet')
         .addStringOption(option =>
             option.setName('name')
-                .setDescription('The name to search in the sheet')
+                .setDescription('Name to search in Column A')
                 .setRequired(true))
-].map(command => command.toJSON());
+].map(cmd => cmd.toJSON());
 
+// Register Slash Commands on Bot Ready
 client.once('ready', async () => {
-    console.log(`Bot logged in as ${client.user.tag}`);
+    console.log(`Bot online as ${client.user.tag}`);
 
-    // Register slash commands globally (or per guild)
-    const rest = new REST({ version: '10' }).setToken('YOUR_DISCORD_BOT_TOKEN');
+    const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
     try {
         await rest.put(
-            Routes.applicationCommands(client.user.id),
+            Routes.applicationCommands(CLIENT_ID),
             { body: commands }
         );
-        console.log('Slash commands registered successfully!');
-    } catch (error) {
-        console.error('Error registering slash commands:', error);
+        console.log('Slash commands registered successfully.');
+    } catch (err) {
+        console.error('Failed to register slash commands:', err);
     }
 });
 
+// Handle Slash Command Interactions
 client.on('interactionCreate', async (interaction) => {
-    // Only process slash commands
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'verify') {
-        const targetName = interaction.options.getString('name');
+        // 1. Immediately tell Discord to wait (prevents "Application didn't respond in time")
+        await interaction.deferReply();
 
-        // 1. DEFER IMMEDIATELY to prevent the 3-second timeout!
-        await interaction.deferReply(); 
+        const inputName = interaction.options.getString('name');
 
         try {
+            // Load Google Sheet
             await doc.loadInfo();
             const sheet = doc.sheetsByIndex[0];
             const rows = await sheet.getRows();
 
-            const row = rows.find(r => r.get('Name')?.toLowerCase() === targetName.toLowerCase());
+            // Match user in Column A ("Name")
+            const row = rows.find(r => {
+                const sheetName = r.get('Name');
+                return sheetName && sheetName.toLowerCase() === inputName.toLowerCase();
+            });
 
             if (row) {
-                const device = row.get('Device') || 'N/A';
                 const name = row.get('Name');
+                const role = row.get('Role') || 'Member';
+                const robloxUser = row.get('Roblox User') || 'N/A';
+                const device = row.get('Device') || 'N/A';
 
-                // 2. EDIT DEFERRED REPLY once sheet data is fetched
-                await interaction.editReply(`📱 **${name}** plays on: **${device}**`);
+                // 2. Edit deferred reply with fetched data
+                await interaction.editReply({
+                    content: `✅ **Verification Successful**\n• **Name:** ${name}\n• **Role:** ${role}\n• **Roblox User:** ${robloxUser}\n• **Device:** ${device}`
+                });
             } else {
-                await interaction.editReply(`❌ Could not find user **${targetName}** in the sheet.`);
+                await interaction.editReply(`❌ User **${inputName}** was not found in the sheet.`);
             }
         } catch (error) {
-            console.error(error);
-            await interaction.editReply('There was an error reading the Google Sheet.');
+            console.error('Sheet fetch error:', error);
+            await interaction.editReply('❌ An error occurred while fetching data from Google Sheets.');
         }
     }
 });
 
-client.login('YOUR_DISCORD_BOT_TOKEN');
+client.login(BOT_TOKEN);
