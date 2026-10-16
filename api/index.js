@@ -13,6 +13,8 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const MEMBER_RANGE = 'Members!A2:D';
 const WARNING_SHEET = 'Warnings';
 const REPORT_SHEET = 'Reports';
+const LOG_SHEET = 'BotLogs';
+const LOG_HEADERS = ['Timestamp', 'Level', 'Source', 'Case ID', 'Details'];
 const WARNING_DURATIONS_MS = [60 * 60 * 1000, 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
 const WARNING_LABELS = ['1 hour', '24 hours', '7 days'];
 const WARNING_HEADERS = [
@@ -48,6 +50,28 @@ function createSheetsClient() {
     return google.sheets({ version: 'v4', auth });
 }
 
+async function logBotError(source, error, caseId = '') {
+    const details = String(error?.message || error || 'Unknown error')
+        .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[redacted]')
+        .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+        .slice(0, 500);
+    console.error(`[${source}]${caseId ? ` [${caseId}]` : ''}`, details);
+
+    try {
+        const sheets = createSheetsClient();
+        await ensureSheet(sheets, LOG_SHEET, LOG_HEADERS);
+        await appendRow(sheets, LOG_SHEET, 'E', [
+            new Date().toISOString(),
+            'ERROR',
+            source,
+            caseId,
+            details,
+        ]);
+    } catch (loggingError) {
+        console.error('Could not save diagnostic to BotLogs sheet:', loggingError);
+    }
+}
+
 async function getSheetMembers() {
     try {
         const response = await createSheetsClient().spreadsheets.values.get({
@@ -56,7 +80,7 @@ async function getSheetMembers() {
         });
         return response.data.values || [];
     } catch (error) {
-        console.error('Error fetching Google Sheet:', error);
+        await logBotError('Verification: Google Sheets read', error);
         return [];
     }
 }
@@ -262,7 +286,7 @@ async function handleReport(interaction, res) {
             content: `Your report (\`${caseId}\`) has been sent to a moderator for review.`,
         });
     } catch (error) {
-        console.error('Could not process report command:', error);
+        await logBotError('Report submission', error, caseId || '');
         if (moderatorDm && reportMessage && caseId) {
             await discordRequest(`/channels/${moderatorDm.id}/messages/${reportMessage.id}`, {
                 method: 'PATCH',
@@ -371,7 +395,7 @@ async function handleApproval(interaction, res) {
             content: `Approved case ${caseIdValue}. Warning ${warningNumber} logged; timeout: ${WARNING_LABELS[scheduleIndex]}. ${dmStatus}`,
         });
     } catch (error) {
-        console.error(`Could not approve report case ${caseId}:`, error);
+        await logBotError('Report approval', error, caseId);
         if (reportRowNumber && report?.[1] === 'PENDING') {
             await sheets.spreadsheets.values.update({
                 spreadsheetId: SPREADSHEET_ID,
@@ -451,7 +475,7 @@ export default async function handler(req, res) {
 
         return res.status(400).send({ error: 'Unknown interaction' });
     } catch (error) {
-        console.error('Server error:', error);
+        await logBotError('Discord interaction handler', error);
         return res.status(500).send({ error: 'Internal server error' });
     }
 }
