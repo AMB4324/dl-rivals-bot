@@ -79,6 +79,14 @@
         .service strong { display: block; }
         .service small { display: block; margin-top: 3px; color: #a8b5c8; line-height: 1.45; }
         .meta { margin: 20px 0 0; color: #8290a4; font-size: .82rem; }
+        .logs { margin-top: 24px; padding-top: 18px; border-top: 1px solid #27364c; }
+        .logs h2 { margin: 0 0 8px; font-size: 1.05rem; }
+        .logs-intro { margin: 0 0 12px; color: #a8b5c8; font-size: .85rem; }
+        .log-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; padding: 0; list-style: none; }
+        .log-item { padding: 10px 12px; border: 1px solid #344158; border-radius: 9px; overflow-wrap: anywhere; }
+        .log-item.error { border-color: #75414a; }
+        .log-item strong { display: block; margin-bottom: 4px; font-size: .85rem; }
+        .log-item small { color: #a8b5c8; line-height: 1.45; white-space: pre-wrap; }
         .actions { display: flex; gap: 10px; margin-top: 20px; }
         .secondary { border: 1px solid #3b4a61; background: transparent; }
         @media (max-width: 420px) { main { padding: 23px; } }
@@ -100,6 +108,11 @@
             <div class="overall"><span class="dot" id="overall-dot"></span><span id="overall-text"></span></div>
             <div id="services"></div>
             <p class="meta" id="checked-at"></p>
+            <section class="logs" aria-labelledby="logs-heading">
+                <h2 id="logs-heading">Recent bot logs</h2>
+                <p class="logs-intro">Errors from report handling and spreadsheet checks appear here.</p>
+                <ol class="log-list" id="log-list"></ol>
+            </section>
             <div class="actions">
                 <button id="refresh-button" type="button">Refresh checks</button>
                 <button id="lock-button" class="secondary" type="button">Lock</button>
@@ -170,17 +183,37 @@
                     const row = document.createElement('div');
                     row.className = 'service';
                     const dot = document.createElement('span');
-                    dot.className = `dot ${result.reportSheetsReady ? 'ok' : 'optional'}`;
+                    dot.className = `dot ${sheets.writeAccess?.status || 'optional'}`;
                     const text = document.createElement('div');
                     const name = document.createElement('strong');
-                    name.textContent = 'Report and warning sheets';
+                    name.textContent = 'Google Sheets write access';
                     const detail = document.createElement('small');
-                    detail.textContent = result.reportSheetsReady
-                        ? 'Reports and Warnings tabs are available'
-                        : 'Tabs are created when the first report is submitted';
+                    detail.textContent = sheets.writeAccess?.message || 'Could not check write access';
                     text.append(name, detail);
                     row.append(dot, text);
                     services.append(row);
+                }
+
+                const logList = document.querySelector('#log-list');
+                logList.replaceChildren();
+                const logs = result.logs || sheets.logs || [];
+                if (!logs.length) {
+                    const empty = document.createElement('li');
+                    empty.className = 'log-item';
+                    empty.textContent = 'No saved bot logs yet. If writing is unavailable, see the Google Sheets error above.';
+                    logList.append(empty);
+                } else {
+                    for (const entry of logs.slice().reverse()) {
+                        const item = document.createElement('li');
+                        item.className = `log-item ${String(entry.level).toLowerCase() === 'error' ? 'error' : ''}`;
+                        const title = document.createElement('strong');
+                        const date = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Unknown time';
+                        title.textContent = `${entry.level} · ${entry.source} · ${date}${entry.caseId ? ` · Case ${entry.caseId}` : ''}`;
+                        const detail = document.createElement('small');
+                        detail.textContent = entry.details;
+                        item.append(title, detail);
+                        logList.append(item);
+                    }
                 }
 
                 document.querySelector('#checked-at').textContent =
