@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { google } from 'googleapis';
 import { verifyKey } from 'discord-interactions';
+import { waitUntil } from '@vercel/functions';
 
 // Tell Vercel NOT to pre-parse the body so Discord signature verification works
 export const config = {
@@ -50,26 +51,35 @@ function createSheetsClient() {
     return google.sheets({ version: 'v4', auth });
 }
 
-async function logBotError(source, error, caseId = '') {
-    const details = String(error?.message || error || 'Unknown error')
+async function logBotEvent(level, source, details, caseId = '', persist = level === 'ERROR') {
+    const safeDetails = String(details || 'No details')
         .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[redacted]')
         .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
         .slice(0, 500);
-    console.error(`[${source}]${caseId ? ` [${caseId}]` : ''}`, details);
+    if (level === 'ERROR') {
+        console.error(`[${source}]${caseId ? ` [${caseId}]` : ''}`, safeDetails);
+    } else {
+        console.log(`[${source}]${caseId ? ` [${caseId}]` : ''}`, safeDetails);
+    }
+    if (!persist) return;
 
     try {
         const sheets = createSheetsClient();
         await ensureSheet(sheets, LOG_SHEET, LOG_HEADERS);
         await appendRow(sheets, LOG_SHEET, 'E', [
             new Date().toISOString(),
-            'ERROR',
+            level,
             source,
             caseId,
-            details,
+            safeDetails,
         ]);
     } catch (loggingError) {
         console.error('Could not save diagnostic to BotLogs sheet:', loggingError);
     }
+}
+
+async function logBotError(source, error, caseId = '') {
+    await logBotEvent('ERROR', source, error?.message || error || 'Unknown error', caseId);
 }
 
 async function getSheetMembers() {
@@ -205,14 +215,26 @@ async function handleReport(interaction, res) {
         },
     });
 
-    let moderatorDm;
-    let reportMessage;
-    let caseId;
-    try {
+    const processing = (async () => {
+      let moderatorDm;
+      let reportMessage;
+      let caseId;
+      let reportWasStored = false;
+      try {
+        if (!process.env.DISCORD_BOT_TOKEN
+            || !process.env.MODERATOR_USER_ID
+            || !process.env.REPORT_CATEGORY_ID) {
+            throw new Error('Vercel is missing DISCORD_BOT_TOKEN, MODERATOR_USER_ID, or REPORT_CATEGORY_ID.');
+        }
+        caseId = randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase();
+        await logBotEvent('INFO', 'Report submission', 'Started report processing', caseId);
+
         const channel = await discordRequest(`/channels/${interaction.channel_id}`);
         if (channel.parent_id !== process.env.REPORT_CATEGORY_ID) {
             throw new Error('Use /report inside a report ticket channel.');
         }
+        await logBotEvent('INFO', 'Report submission', 'Report ticket category verified', caseId);
+
         const target = await discordRequest(`/guilds/${interaction.guild_id}/members/${targetId}`);
         if (targetId === interaction.member?.user?.id) {
             throw new Error('You cannot report yourself.');
@@ -226,31 +248,12 @@ async function handleReport(interaction, res) {
         if (Number(attachment.size) > 10 * 1024 * 1024) {
             throw new Error('Evidence image must be 10 MB or smaller.');
         }
-        caseId = randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase();
-        moderatorDm = await discordRequest('/users/@me/channels', {
-            method: 'POST',
-            body: JSON.stringify({ recipient_id: process.env.MODERATOR_USER_ID }),
-        });
-        reportMessage = await discordRequest(`/channels/${moderatorDm.id}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-                content: [
-                    `**Report case ${caseId}**`,
-                    `Ticket: <#${interaction.channel_id}>`,
-                    `Reported member: ${target.user.username} (\`${targetId}\`)`,
-                    `Reporter ID: \`${interaction.member.user.id}\``,
-                    `Description: ${description.slice(0, 1000)}`,
-                    '',
-                    'Saving this report for approval. Please review the screenshot manually.',
-                ].join('\n'),
-                embeds: [{ image: { url: attachment.url } }],
-                allowed_mentions: { parse: [] },
-            }),
-        });
+        await logBotEvent('INFO', 'Report submission', 'Report fields validated', caseId);
 
         const sheets = createSheetsClient();
         await ensureSheet(sheets, REPORT_SHEET, REPORT_HEADERS);
         await ensureSheet(sheets, WARNING_SHEET, WARNING_HEADERS);
+        await logBotEvent('INFO', 'Report submission', 'Report and warning sheets are ready', caseId);
         await appendRow(sheets, REPORT_SHEET, 'N', [
             caseId,
             'PENDING',
@@ -267,6 +270,30 @@ async function handleReport(interaction, res) {
             new Date().toISOString(),
             '',
         ]);
+        reportWasStored = true;
+        await logBotEvent('INFO', 'Report submission', 'Report saved to Reports sheet', caseId);
+
+        moderatorDm = await discordRequest('/users/@me/channels', {
+            method: 'POST',
+            body: JSON.stringify({ recipient_id: process.env.MODERATOR_USER_ID }),
+        });
+        reportMessage = await discordRequest(`/channels/${moderatorDm.id}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+                content: [
+                    `**Report case ${caseId}**`,
+                    `Ticket: <#${interaction.channel_id}>`,
+                    `Reported member: ${target.user.username} (\`${targetId}\`)`,
+                    `Reporter ID: \`${interaction.member.user.id}\``,
+                    `Description: ${description.slice(0, 1000)}`,
+                    '',
+                    'Please review the screenshot manually before approving.',
+                ].join('\n'),
+                embeds: [{ image: { url: attachment.url } }],
+                allowed_mentions: { parse: [] },
+            }),
+        });
+        await logBotEvent('INFO', 'Report submission', 'Report DM and screenshot sent to moderator', caseId);
 
         await discordRequest(`/channels/${moderatorDm.id}/messages/${reportMessage.id}`, {
             method: 'PATCH',
@@ -282,11 +309,29 @@ async function handleReport(interaction, res) {
                 }],
             }),
         });
+        await logBotEvent('INFO', 'Report submission', 'Approval button added to moderator DM', caseId);
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
             content: `Your report (\`${caseId}\`) has been sent to a moderator for review.`,
         });
-    } catch (error) {
+        await logBotEvent('INFO', 'Report submission', 'Report delivered and approval button is ready', caseId, true);
+      } catch (error) {
         await logBotError('Report submission', error, caseId || '');
+        if (reportWasStored) {
+            const sheets = createSheetsClient();
+            const rows = await getRows(sheets, REPORT_SHEET, 'N').catch(readError => {
+                console.error('Could not locate saved report row:', readError);
+                return [];
+            });
+            const rowIndex = rows.findIndex(row => row[0] === caseId);
+            if (rowIndex >= 0) {
+                await sheets.spreadsheets.values.update({
+                    spreadsheetId: SPREADSHEET_ID,
+                    range: `${REPORT_SHEET}!B${rowIndex + 2}`,
+                    valueInputOption: 'RAW',
+                    requestBody: { values: [['DM_FAILED']] },
+                }).catch(updateError => console.error('Could not mark failed report delivery:', updateError));
+            }
+        }
         if (moderatorDm && reportMessage && caseId) {
             await discordRequest(`/channels/${moderatorDm.id}/messages/${reportMessage.id}`, {
                 method: 'PATCH',
@@ -297,9 +342,11 @@ async function handleReport(interaction, res) {
             }).catch(updateError => console.error('Could not annotate unqueued moderator report DM:', updateError));
         }
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
-            content: `I could not finish sending this report: ${error.message || 'unknown error'}. Please contact a moderator.`,
+            content: `Report ${caseId || ''} failed: ${error.message || 'unknown error'}. Please tell a moderator and check the private status page logs.`,
         }).catch(followupError => console.error('Could not update report response:', followupError));
-    }
+      }
+    })();
+    waitUntil(processing);
 }
 
 async function handleApproval(interaction, res) {
