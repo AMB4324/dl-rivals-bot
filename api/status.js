@@ -2,7 +2,6 @@ import { timingSafeEqual } from 'node:crypto';
 import { google } from 'googleapis';
 
 const DISCORD_API = 'https://discord.com/api/v10';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 function passwordMatches(candidate) {
     const expected = process.env.STATUS_PAGE_PASSWORD;
@@ -78,30 +77,6 @@ async function checkGoogleSheets() {
     }
 }
 
-async function checkGemini() {
-    if (!process.env.GEMINI_API_KEY) {
-        return { status: 'optional', message: 'No API key set; reports require manual image review' };
-    }
-
-    try {
-        const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}`,
-            {
-                headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY },
-                signal: AbortSignal.timeout(8000),
-            },
-        );
-        if (!response.ok) {
-            console.error(`Gemini status check failed (HTTP ${response.status})`);
-            return { status: 'error', message: 'Gemini API key or model could not be verified' };
-        }
-        return { status: 'ok', message: `${GEMINI_MODEL} is reachable` };
-    } catch (error) {
-        console.error('Gemini status check failed:', error);
-        return { status: 'error', message: 'Could not reach Gemini API' };
-    }
-}
-
 export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'no-store, max-age=0');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -120,15 +95,13 @@ export default async function handler(req, res) {
         return res.status(401).json({ error: 'Incorrect password' });
     }
 
-    const [discord, googleSheets, gemini] = await Promise.all([
+    const [discord, googleSheets] = await Promise.all([
         checkDiscord(),
         checkGoogleSheets(),
-        checkGemini(),
     ]);
-    const statuses = { discord, googleSheets, gemini };
+    const statuses = { discord, googleSheets };
     const allRequiredServicesResponding = discord.status === 'ok'
-        && googleSheets.status === 'ok'
-        && gemini.status !== 'error';
+        && googleSheets.status === 'ok';
     return res.status(200).json({
         checkedAt: new Date().toISOString(),
         overall: allRequiredServicesResponding ? 'working' : 'issues',
