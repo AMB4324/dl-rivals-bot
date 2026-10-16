@@ -1,1 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>DL Rivals Bot Status</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #0c1018;
+            color: #edf2fb;
+        }
+        * { box-sizing: border-box; }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            background: radial-gradient(ellipse at top, #1b2941 0, #0c1018 58%);
+        }
+        main {
+            width: min(100%, 560px);
+            padding: 32px;
+            border: 1px solid #27364c;
+            border-radius: 20px;
+            background: #111824;
+            box-shadow: 0 24px 80px #0007;
+        }
+        h1 { margin: 0; font-size: clamp(1.6rem, 5vw, 2.2rem); }
+        .subtitle { margin: 8px 0 28px; color: #a8b5c8; }
+        label { display: block; margin: 0 0 8px; font-weight: 650; }
+        input, button {
+            min-height: 46px;
+            border-radius: 10px;
+            font: inherit;
+        }
+        input {
+            width: 100%;
+            margin-bottom: 12px;
+            padding: 0 13px;
+            border: 1px solid #3b4a61;
+            background: #0c121c;
+            color: inherit;
+        }
+        button {
+            padding: 0 17px;
+            border: 0;
+            background: #577ff5;
+            color: white;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        button:disabled { opacity: .65; cursor: wait; }
+        button:focus-visible, input:focus-visible { outline: 3px solid #9bb4ff; outline-offset: 2px; }
+        .error { min-height: 1.5em; margin: 10px 0 0; color: #ff9292; }
+        [hidden] { display: none !important; }
+        .overall {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 18px;
+            font-size: 1.1rem;
+            font-weight: 750;
+        }
+        .service {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 15px 0;
+            border-top: 1px solid #27364c;
+        }
+        .dot { width: 11px; height: 11px; flex: 0 0 11px; margin-top: 5px; border-radius: 50%; background: #8290a4; }
+        .dot.ok { background: #42d392; box-shadow: 0 0 12px #42d39266; }
+        .dot.error { background: #ff6868; box-shadow: 0 0 12px #ff686866; }
+        .dot.optional, .dot.not_configured { background: #f0b84a; }
+        .service strong { display: block; }
+        .service small { display: block; margin-top: 3px; color: #a8b5c8; line-height: 1.45; }
+        .meta { margin: 20px 0 0; color: #8290a4; font-size: .82rem; }
+        .actions { display: flex; gap: 10px; margin-top: 20px; }
+        .secondary { border: 1px solid #3b4a61; background: transparent; }
+        @media (max-width: 420px) { main { padding: 23px; } }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>DL Rivals Bot</h1>
+        <p class="subtitle">Private service status dashboard</p>
 
+        <form id="unlock-form">
+            <label for="password">Dashboard password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <button id="unlock-button" type="submit">Unlock status</button>
+            <p class="error" id="login-error" role="alert"></p>
+        </form>
+
+        <section id="dashboard" hidden aria-live="polite">
+            <div class="overall"><span class="dot" id="overall-dot"></span><span id="overall-text"></span></div>
+            <div id="services"></div>
+            <p class="meta" id="checked-at"></p>
+            <div class="actions">
+                <button id="refresh-button" type="button">Refresh checks</button>
+                <button id="lock-button" class="secondary" type="button">Lock</button>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const form = document.querySelector('#unlock-form');
+        const passwordInput = document.querySelector('#password');
+        const unlockButton = document.querySelector('#unlock-button');
+        const loginError = document.querySelector('#login-error');
+        const dashboard = document.querySelector('#dashboard');
+        const serviceNames = {
+            discord: 'Discord bot API',
+            googleSheets: 'Google Sheets / verification roster',
+            gemini: 'Gemini image analysis',
+        };
+        let dashboardPassword = '';
+
+        async function loadStatus() {
+            unlockButton.disabled = true;
+            document.querySelector('#refresh-button').disabled = true;
+            loginError.textContent = '';
+            try {
+                const response = await fetch('/api/status', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    cache: 'no-store',
+                    body: JSON.stringify({ password: dashboardPassword }),
+                });
+                const responseText = await response.text();
+                let result;
+                try {
+                    result = JSON.parse(responseText);
+                } catch {
+                    throw new Error('Status API is unavailable. Open this page from your deployed Vercel URL.');
+                }
+                if (!response.ok) {
+                    if (response.status === 401) lockDashboard('Incorrect password.');
+                    else throw new Error(result.error || 'Status check failed.');
+                    return;
+                }
+
+                const overallDot = document.querySelector('#overall-dot');
+                overallDot.className = `dot ${result.overall === 'working' ? 'ok' : 'error'}`;
+                document.querySelector('#overall-text').textContent =
+                    result.overall === 'working' ? 'All configured services are responding' : 'Some services need attention';
+
+                const services = document.querySelector('#services');
+                services.replaceChildren();
+                for (const [key, service] of Object.entries(result.services)) {
+                    const row = document.createElement('div');
+                    row.className = 'service';
+                    const dot = document.createElement('span');
+                    dot.className = `dot ${service.status}`;
+                    const text = document.createElement('div');
+                    const name = document.createElement('strong');
+                    name.textContent = serviceNames[key] || key;
+                    const detail = document.createElement('small');
+                    detail.textContent = service.message;
+                    text.append(name, detail);
+                    row.append(dot, text);
+                    services.append(row);
+                }
+
+                const sheets = result.services.googleSheets;
+                if (sheets.status === 'ok') {
+                    const row = document.createElement('div');
+                    row.className = 'service';
+                    const dot = document.createElement('span');
+                    dot.className = `dot ${result.reportSheetsReady ? 'ok' : 'optional'}`;
+                    const text = document.createElement('div');
+                    const name = document.createElement('strong');
+                    name.textContent = 'Report and warning sheets';
+                    const detail = document.createElement('small');
+                    detail.textContent = result.reportSheetsReady
+                        ? 'Reports and Warnings tabs are available'
+                        : 'Tabs are created when the first report is submitted';
+                    text.append(name, detail);
+                    row.append(dot, text);
+                    services.append(row);
+                }
+
+                document.querySelector('#checked-at').textContent =
+                    `Last checked: ${new Date(result.checkedAt).toLocaleString()}`;
+                form.hidden = true;
+                dashboard.hidden = false;
+                unlockButton.disabled = false;
+                document.querySelector('#refresh-button').disabled = false;
+            } catch (error) {
+                loginError.textContent = error.message || 'Could not check services. Try again.';
+                unlockButton.disabled = false;
+                document.querySelector('#refresh-button').disabled = false;
+            }
+        }
+
+        function lockDashboard(errorMessage = '') {
+            dashboardPassword = '';
+            passwordInput.value = '';
+            dashboard.hidden = true;
+            form.hidden = false;
+            loginError.textContent = errorMessage;
+            unlockButton.disabled = false;
+            passwordInput.focus();
+        }
+
+        form.addEventListener('submit', event => {
+            event.preventDefault();
+            dashboardPassword = passwordInput.value;
+            passwordInput.value = '';
+            loadStatus();
+        });
+        document.querySelector('#refresh-button').addEventListener('click', loadStatus);
+        document.querySelector('#lock-button').addEventListener('click', () => lockDashboard());
+    </script>
+</body>
+</html>
