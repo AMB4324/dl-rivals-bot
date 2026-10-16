@@ -37,6 +37,7 @@ function getRawBody(req) {
 }
 
 function createSheetsClient() {
+    google.options({ timeout: 10_000 });
     const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_CLIENT_EMAIL,
@@ -120,6 +121,7 @@ async function appendRow(sheets, title, lastColumn, values) {
 async function discordRequest(path, options = {}) {
     const response = await fetch(`${DISCORD_API}${path}`, {
         ...options,
+        signal: options.signal || AbortSignal.timeout(10_000),
         headers: {
             authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`,
             ...(options.body ? { 'content-type': 'application/json' } : {}),
@@ -137,6 +139,7 @@ async function discordRequest(path, options = {}) {
 async function webhookRequest(applicationId, token, path, method, body) {
     const response = await fetch(`${DISCORD_API}/webhooks/${applicationId}/${token}${path}`, {
         method,
+        signal: AbortSignal.timeout(10_000),
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
     });
@@ -178,6 +181,9 @@ async function handleReport(interaction, res) {
         },
     });
 
+    let moderatorDm;
+    let reportMessage;
+    let caseId;
     try {
         const channel = await discordRequest(`/channels/${interaction.channel_id}`);
         if (channel.parent_id !== process.env.REPORT_CATEGORY_ID) {
@@ -196,7 +202,28 @@ async function handleReport(interaction, res) {
         if (Number(attachment.size) > 10 * 1024 * 1024) {
             throw new Error('Evidence image must be 10 MB or smaller.');
         }
-        const caseId = randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase();
+        caseId = randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase();
+        moderatorDm = await discordRequest('/users/@me/channels', {
+            method: 'POST',
+            body: JSON.stringify({ recipient_id: process.env.MODERATOR_USER_ID }),
+        });
+        reportMessage = await discordRequest(`/channels/${moderatorDm.id}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+                content: [
+                    `**Report case ${caseId}**`,
+                    `Ticket: <#${interaction.channel_id}>`,
+                    `Reported member: ${target.user.username} (\`${targetId}\`)`,
+                    `Reporter ID: \`${interaction.member.user.id}\``,
+                    `Description: ${description.slice(0, 1000)}`,
+                    '',
+                    'Saving this report for approval. Please review the screenshot manually.',
+                ].join('\n'),
+                embeds: [{ image: { url: attachment.url } }],
+                allowed_mentions: { parse: [] },
+            }),
+        });
+
         const sheets = createSheetsClient();
         await ensureSheet(sheets, REPORT_SHEET, REPORT_HEADERS);
         await ensureSheet(sheets, WARNING_SHEET, WARNING_HEADERS);
@@ -217,23 +244,9 @@ async function handleReport(interaction, res) {
             '',
         ]);
 
-        const dm = await discordRequest('/users/@me/channels', {
-            method: 'POST',
-            body: JSON.stringify({ recipient_id: process.env.MODERATOR_USER_ID }),
-        });
-        await discordRequest(`/channels/${dm.id}/messages`, {
-            method: 'POST',
+        await discordRequest(`/channels/${moderatorDm.id}/messages/${reportMessage.id}`, {
+            method: 'PATCH',
             body: JSON.stringify({
-                content: [
-                    `**Report case ${caseId}**`,
-                    `Ticket: <#${interaction.channel_id}>`,
-                    `Reported member: ${target.user.username} (\`${targetId}\`)`,
-                    `Reporter ID: \`${interaction.member.user.id}\``,
-                    `Description: ${description.slice(0, 1000)}`,
-                    '',
-                    'Please review the screenshot and report manually before approving.',
-                ].join('\n'),
-                embeds: [{ image: { url: attachment.url } }],
                 components: [{
                     type: 1,
                     components: [{
@@ -243,7 +256,6 @@ async function handleReport(interaction, res) {
                         custom_id: `approve_report:${caseId}`,
                     }],
                 }],
-                allowed_mentions: { parse: [] },
             }),
         });
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
@@ -251,8 +263,17 @@ async function handleReport(interaction, res) {
         });
     } catch (error) {
         console.error('Could not process report command:', error);
+        if (moderatorDm && reportMessage && caseId) {
+            await discordRequest(`/channels/${moderatorDm.id}/messages/${reportMessage.id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({
+                    content: `**Report case ${caseId} could not be queued for approval.**\nThe screenshot was delivered, but saving the case failed. Do not approve it until the Reports sheet has been checked.`,
+                    components: [],
+                }),
+            }).catch(updateError => console.error('Could not annotate unqueued moderator report DM:', updateError));
+        }
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
-            content: error.message || 'The report could not be processed. Please contact a moderator.',
+            content: `I could not finish sending this report: ${error.message || 'unknown error'}. Please contact a moderator.`,
         }).catch(followupError => console.error('Could not update report response:', followupError));
     }
 }
