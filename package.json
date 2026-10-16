@@ -3,8 +3,14 @@
   "version": "1.0.0",
   "description": "DL Clan Verification Bot",
   "main": "api/index.js",
+  "scripts": {
+    "register:commands": "node scripts/register-commands.mjs"
+  },
   "dependencies": {
     "discord-interactions": "^3.4.0",
     "googleapis": "^126.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
