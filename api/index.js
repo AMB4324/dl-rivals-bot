@@ -360,16 +360,20 @@ async function handleApproval(interaction, res) {
     }
 
     res.status(200).send({ type: 5, data: { flags: 64 } });
-    const sheets = createSheetsClient();
-    let reportRowNumber;
-    let report;
-    let timeoutApplied = false;
-    try {
+    const processing = (async () => {
+      const sheets = createSheetsClient();
+      let reportRowNumber;
+      let report;
+      let timeoutApplied = false;
+      try {
+        if (!process.env.DISCORD_BOT_TOKEN || !process.env.MODERATOR_USER_ID) {
+            throw new Error('Vercel is missing DISCORD_BOT_TOKEN or MODERATOR_USER_ID.');
+        }
         await ensureSheet(sheets, REPORT_SHEET, REPORT_HEADERS);
         await ensureSheet(sheets, WARNING_SHEET, WARNING_HEADERS);
         const reports = await getRows(sheets, REPORT_SHEET, 'N');
         const index = reports.findIndex(row => row[0] === caseId);
-        if (index < 0) throw new Error('Report case not found.');
+        if (index < 0) throw new Error('Report case not found in Reports sheet.');
         reportRowNumber = index + 2;
         report = reports[index];
         if (report[1] !== 'PENDING') throw new Error(`This report is already ${String(report[1]).toLowerCase()}.`);
@@ -391,9 +395,7 @@ async function handleApproval(interaction, res) {
         const timeoutUntil = new Date(Date.now() + timeoutMs).toISOString();
         await discordRequest(`/guilds/${guildId}/members/${targetId}`, {
             method: 'PATCH',
-            body: JSON.stringify({
-                communication_disabled_until: timeoutUntil,
-            }),
+            body: JSON.stringify({ communication_disabled_until: timeoutUntil }),
             headers: { 'x-audit-log-reason': encodeURIComponent(`Approved report ${caseIdValue}; warning ${warningNumber}`) },
         });
         timeoutApplied = true;
@@ -441,7 +443,8 @@ async function handleApproval(interaction, res) {
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
             content: `Approved case ${caseIdValue}. Warning ${warningNumber} logged; timeout: ${WARNING_LABELS[scheduleIndex]}. ${dmStatus}`,
         });
-    } catch (error) {
+        await logBotEvent('INFO', 'Report approval', 'Approved, timed out, and logged warning', caseIdValue, true);
+      } catch (error) {
         await logBotError('Report approval', error, caseId);
         if (reportRowNumber && report?.[1] === 'PENDING') {
             await sheets.spreadsheets.values.update({
@@ -456,9 +459,11 @@ async function handleApproval(interaction, res) {
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
             content: timeoutApplied
                 ? 'The timeout was applied, but I could not finish recording the warning. The case was locked to prevent duplicate action; please reconcile the Warnings tab manually.'
-                : (error.message || 'Approval failed. Check the bot permissions and report sheet.'),
+                : `Approval failed: ${error.message || 'unknown error'}. Check Recent bot logs on the status page.`,
         }).catch(followupError => console.error('Could not update approval response:', followupError));
-    }
+      }
+    })();
+    waitUntil(processing);
 }
 
 export default async function handler(req, res) {
