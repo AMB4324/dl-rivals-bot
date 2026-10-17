@@ -549,6 +549,11 @@ async function handleOpenReportTicket(interaction, res) {
                             style: 2,
                             label: 'Close ticket',
                             custom_id: 'close_report_ticket',
+                        }, {
+                            type: 2,
+                            style: 4,
+                            label: 'Delete ticket',
+                            custom_id: 'delete_report_ticket',
                         }],
                     }],
                     allowed_mentions: { users: [interaction.member.user.id] },
@@ -608,6 +613,71 @@ async function handleCloseReportTicket(interaction, res) {
     waitUntil(processing);
 }
 
+async function handleDeleteReportTicket(interaction, res) {
+    const actorId = interaction.member?.user?.id;
+    if (actorId !== process.env.MODERATOR_USER_ID) {
+        return res.status(200).send({
+            type: 4,
+            data: {
+                content: 'Only the configured moderator can permanently delete a ticket.',
+                flags: 64,
+            },
+        });
+    }
+
+    return res.status(200).send({
+        type: 4,
+        data: {
+            content: 'This permanently deletes the ticket and its messages. Are you sure?',
+            flags: 64,
+            components: [{
+                type: 1,
+                components: [{
+                    type: 2,
+                    style: 4,
+                    label: 'Confirm permanent deletion',
+                    custom_id: `confirm_delete_report_ticket:${interaction.channel_id}`,
+                }],
+            }],
+        },
+    });
+}
+
+async function handleConfirmDeleteReportTicket(interaction, res) {
+    const actorId = interaction.member?.user?.id;
+    if (actorId !== process.env.MODERATOR_USER_ID) {
+        return res.status(200).send({
+            type: 4,
+            data: { content: 'Only the configured moderator can permanently delete a ticket.', flags: 64 },
+        });
+    }
+
+    res.status(200).send({
+        type: 4,
+        data: { content: 'Deleting the ticket…', flags: 64 },
+    });
+
+    const processing = (async () => {
+        try {
+            const channelId = interaction.data.custom_id.slice('confirm_delete_report_ticket:'.length);
+            if (channelId !== interaction.channel_id) {
+                throw new Error('The confirmation must be used in the ticket being deleted.');
+            }
+            const channel = await discordRequest(`/channels/${channelId}`);
+            if (!channel.topic?.match(/^report-ticket:\d+$/)) {
+                throw new Error('This is not a bot-managed report ticket.');
+            }
+            await discordRequest(`/channels/${channelId}`, { method: 'DELETE' });
+        } catch (error) {
+            await logBotError('Ticket deletion', error);
+            await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
+                content: `Could not delete this ticket: ${error.message || 'unknown error'}.`,
+            }).catch(followupError => console.error('Could not update ticket deletion response:', followupError));
+        }
+    })();
+    waitUntil(processing);
+}
+
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
         return res.status(405).send({ error: 'Method not allowed' });
@@ -658,6 +728,14 @@ export default async function handler(req, res) {
 
         if (interaction.type === 3 && interaction.data.custom_id === 'close_report_ticket') {
             return await handleCloseReportTicket(interaction, res);
+        }
+
+        if (interaction.type === 3 && interaction.data.custom_id === 'delete_report_ticket') {
+            return await handleDeleteReportTicket(interaction, res);
+        }
+
+        if (interaction.type === 3 && interaction.data.custom_id.startsWith('confirm_delete_report_ticket:')) {
+            return await handleConfirmDeleteReportTicket(interaction, res);
         }
 
         if (interaction.type === 5 && interaction.data.custom_id === 'verify_modal') {
