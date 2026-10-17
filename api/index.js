@@ -718,6 +718,16 @@ export default async function handler(req, res) {
             return await handleReport(interaction, res);
         }
 
+        if (interaction.type === 2 && interaction.data.name === 'about') {
+            return res.status(200).send({
+                type: 4,
+                data: {
+                    content: "DL CLAN BOT is currently under development. Some features may be unavailable. Thank you for your patience.",
+                    flags: 64,
+                },
+            });
+        }
+
         if (interaction.type === 3 && interaction.data.custom_id.startsWith('approve_report:')) {
             return await handleApproval(interaction, res);
         }
