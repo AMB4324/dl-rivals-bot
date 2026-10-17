@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>DL Rivals Bot Admin</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #0c1018;
+            color: #edf2fb;
+        }
+        * { box-sizing: border-box; }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            background: radial-gradient(ellipse at top, #1b2941 0, #0c1018 58%);
+        }
+        main {
+            width: min(100%, 680px);
+            padding: 30px;
+            border: 1px solid #27364c;
+            border-radius: 20px;
+            background: #111824;
+            box-shadow: 0 24px 80px #0007;
+        }
+        h1 { margin: 0; font-size: clamp(1.6rem, 5vw, 2.2rem); }
+        h2 { margin: 0 0 8px; font-size: 1.15rem; }
+        .subtitle, .help { color: #a8b5c8; }
+        .subtitle { margin: 8px 0 24px; }
+        .help { margin: 0 0 16px; font-size: .9rem; line-height: 1.5; }
+        section { padding: 20px 0; border-top: 1px solid #27364c; }
+        label { display: block; margin: 14px 0 7px; font-weight: 650; }
+        input, select, textarea, button {
+            width: 100%;
+            border-radius: 10px;
+            font: inherit;
+        }
+        input, select, textarea {
+            padding: 11px 13px;
+            border: 1px solid #3b4a61;
+            background: #0c121c;
+            color: inherit;
+        }
+        textarea { min-height: 125px; resize: vertical; }
+        button {
+            min-height: 45px;
+            margin-top: 14px;
+            padding: 0 16px;
+            border: 0;
+            background: #577ff5;
+            color: white;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        button:disabled { opacity: .65; cursor: wait; }
+        button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+            outline: 3px solid #9bb4ff;
+            outline-offset: 2px;
+        }
+        .secondary { border: 1px solid #3b4a61; background: transparent; }
+        .error { color: #ff9292; }
+        .success { color: #42d392; }
+        .notice { min-height: 1.5em; margin: 12px 0 0; }
+        [hidden] { display: none !important; }
+        @media (max-width: 440px) { main { padding: 22px; } }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>DL Rivals Bot Admin</h1>
+        <p class="subtitle">Send a server message or publish the report-ticket button.</p>
+
+        <form id="login">
+            <label for="password">Admin panel password</label>
+            <input id="password" type="password" autocomplete="current-password" required>
+            <button id="login-button" type="submit">Unlock panel</button>
+            <p class="notice error" id="login-notice" role="alert"></p>
+        </form>
+
+        <div id="panel" hidden>
+            <section>
+                <h2>Send a message</h2>
+                <p class="help">Choose a server text channel and send a message as DL CLAN BOT. Mentions will not ping members.</p>
+                <form id="message-form">
+                    <label for="message-channel">Channel</label>
+                    <select id="message-channel" required></select>
+                    <label for="message-content">Message</label>
+                    <textarea id="message-content" maxlength="2000" required></textarea>
+                    <button type="submit">Send message</button>
+                    <p class="notice" id="message-notice" role="status"></p>
+                </form>
+            </section>
+
+            <section>
+                <h2>Publish report ticket button</h2>
+                <p class="help">Post a button in a public text channel. It opens a private ticket under the configured REPORT_CATEGORY_ID.</p>
+                <form id="ticket-form">
+                    <label for="ticket-channel">Public channel</label>
+                    <select id="ticket-channel" required></select>
+                    <button type="submit">Post ticket panel</button>
+                    <p class="notice" id="ticket-notice" role="status"></p>
+                </form>
+            </section>
+
+            <button id="lock-button" class="secondary" type="button">Lock admin panel</button>
+        </div>
+    </main>
+
+    <script>
+        const loginForm = document.querySelector('#login');
+        const passwordInput = document.querySelector('#password');
+        const loginButton = document.querySelector('#login-button');
+        const loginNotice = document.querySelector('#login-notice');
+        const panel = document.querySelector('#panel');
+        let panelPassword = '';
+        let availableChannels = [];
+
+        async function adminRequest(payload) {
+            const response = await fetch('/api/admin', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                cache: 'no-store',
+                body: JSON.stringify({ ...payload, password: panelPassword }),
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || 'Admin request failed.');
+            return result;
+        }
+
+        function fillChannelSelect(select) {
+            select.replaceChildren();
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = 'Choose a channel';
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            select.append(placeholder);
+            for (const channel of availableChannels) {
+                const option = document.createElement('option');
+                option.value = channel.id;
+                option.textContent = `#${channel.name}`;
+                select.append(option);
+            }
+        }
+
+        loginForm.addEventListener('submit', async event => {
+            event.preventDefault();
+            loginButton.disabled = true;
+            loginNotice.textContent = '';
+            loginNotice.className = 'notice';
+            panelPassword = passwordInput.value;
+            passwordInput.value = '';
+            try {
+                const result = await adminRequest({ action: 'channels' });
+                availableChannels = result.channels;
+                fillChannelSelect(document.querySelector('#message-channel'));
+                fillChannelSelect(document.querySelector('#ticket-channel'));
+                loginForm.hidden = true;
+                panel.hidden = false;
+            } catch (error) {
+                panelPassword = '';
+                loginNotice.textContent = error.message;
+                loginNotice.className = 'notice error';
+                loginButton.disabled = false;
+            }
+        });
+
+        async function submitAction(event, payload, notice) {
+            event.preventDefault();
+            const button = event.submitter;
+            button.disabled = true;
+            notice.textContent = 'Working…';
+            notice.className = 'notice';
+            try {
+                const result = await adminRequest(payload);
+                notice.textContent = result.message;
+                notice.className = 'notice success';
+            } catch (error) {
+                notice.textContent = error.message;
+                notice.className = 'notice error';
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        document.querySelector('#message-form').addEventListener('submit', event => {
+            submitAction(event, {
+                action: 'send-message',
+                channelId: document.querySelector('#message-channel').value,
+                content: document.querySelector('#message-content').value,
+            }, document.querySelector('#message-notice'));
+        });
+        document.querySelector('#ticket-form').addEventListener('submit', event => {
+            submitAction(event, {
+                action: 'publish-ticket-panel',
+                channelId: document.querySelector('#ticket-channel').value,
+            }, document.querySelector('#ticket-notice'));
+        });
+        document.querySelector('#lock-button').addEventListener('click', () => {
+            panelPassword = '';
+            availableChannels = [];
+            panel.hidden = true;
+            loginForm.hidden = false;
+            loginButton.disabled = false;
+            loginNotice.textContent = '';
+            document.querySelector('#message-notice').textContent = '';
+            document.querySelector('#ticket-notice').textContent = '';
+            passwordInput.focus();
+        });
+    </script>
+</body>
+</html>
