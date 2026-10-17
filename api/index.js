@@ -366,6 +366,7 @@ async function handleApproval(interaction, res) {
       let report;
       let timeoutApplied = false;
       try {
+        await logBotEvent('INFO', 'Report approval', 'Approval button click received', caseId, true);
         if (!process.env.DISCORD_BOT_TOKEN || !process.env.MODERATOR_USER_ID) {
             throw new Error('Vercel is missing DISCORD_BOT_TOKEN or MODERATOR_USER_ID.');
         }
@@ -377,6 +378,7 @@ async function handleApproval(interaction, res) {
         reportRowNumber = index + 2;
         report = reports[index];
         if (report[1] !== 'PENDING') throw new Error(`This report is already ${String(report[1]).toLowerCase()}.`);
+        await logBotEvent('INFO', 'Report approval', 'Pending report found in Reports sheet', caseId);
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: SPREADSHEET_ID,
@@ -399,6 +401,7 @@ async function handleApproval(interaction, res) {
             headers: { 'x-audit-log-reason': encodeURIComponent(`Approved report ${caseIdValue}; warning ${warningNumber}`) },
         });
         timeoutApplied = true;
+        await logBotEvent('INFO', 'Report approval', 'Member timeout applied', caseId);
 
         await appendRow(sheets, WARNING_SHEET, 'M', [
             caseIdValue,
@@ -421,6 +424,7 @@ async function handleApproval(interaction, res) {
             valueInputOption: 'RAW',
             requestBody: { values: [['APPROVED', ...report.slice(2, 12), new Date().toISOString(), process.env.MODERATOR_USER_ID]] },
         });
+        await logBotEvent('INFO', 'Report approval', 'Warning logged and report marked approved', caseId);
 
         let dmStatus = 'A warning DM was sent.';
         try {
@@ -439,6 +443,7 @@ async function handleApproval(interaction, res) {
             console.error(`Could not DM warning to member ${targetId}:`, error);
             dmStatus = 'I could not DM the member (they may have DMs disabled).';
         }
+        await logBotEvent('INFO', 'Report approval', dmStatus, caseId);
 
         await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
             content: `Approved case ${caseIdValue}. Warning ${warningNumber} logged; timeout: ${WARNING_LABELS[scheduleIndex]}. ${dmStatus}`,
@@ -462,6 +467,143 @@ async function handleApproval(interaction, res) {
                 : `Approval failed: ${error.message || 'unknown error'}. Check Recent bot logs on the status page.`,
         }).catch(followupError => console.error('Could not update approval response:', followupError));
       }
+    })();
+    waitUntil(processing);
+}
+
+async function handleOpenReportTicket(interaction, res) {
+    res.status(200).send({
+        type: 4,
+        data: { content: 'Opening your private report ticket…', flags: 64 },
+    });
+
+    const processing = (async () => {
+        try {
+            if (!process.env.DISCORD_BOT_TOKEN
+                || !process.env.REPORT_CATEGORY_ID
+                || !process.env.DISCORD_GUILD_ID) {
+                throw new Error('Ticket setup is incomplete in Vercel environment variables.');
+            }
+            if (interaction.guild_id !== process.env.DISCORD_GUILD_ID) {
+                throw new Error('Report tickets can only be opened in the configured server.');
+            }
+
+            const guildChannels = await discordRequest(`/guilds/${interaction.guild_id}/channels`);
+            const existingTicket = guildChannels.find(channel => (
+                channel.parent_id === process.env.REPORT_CATEGORY_ID
+                && channel.topic === `report-ticket:${interaction.member.user.id}`
+            ));
+            if (existingTicket) {
+                await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
+                    content: `You already have an open report ticket: <#${existingTicket.id}>`,
+                });
+                return;
+            }
+
+            const [botUser, guildMember] = await Promise.all([
+                discordRequest('/users/@me'),
+                discordRequest(`/guilds/${interaction.guild_id}/members/${interaction.member.user.id}`),
+            ]);
+            const allowed = (1n << 10n) | (1n << 11n) | (1n << 15n) | (1n << 16n);
+            const moderatorAllowed = (1n << 10n) | (1n << 11n) | (1n << 16n);
+            const denied = 1n << 10n;
+            const username = (guildMember.user.username || 'member')
+                .toLowerCase()
+                .replace(/[^a-z0-9-]/g, '-')
+                .replace(/-+/g, '-')
+                .replace(/^-|-$/g, '')
+                .slice(0, 40) || 'member';
+            const ticket = await discordRequest(`/guilds/${interaction.guild_id}/channels`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    name: `report-${username}`,
+                    type: 0,
+                    parent_id: process.env.REPORT_CATEGORY_ID,
+                    topic: `report-ticket:${interaction.member.user.id}`,
+                    permission_overwrites: [
+                        { id: interaction.guild_id, type: 0, allow: '0', deny: denied.toString() },
+                        { id: interaction.member.user.id, type: 1, allow: allowed.toString(), deny: '0' },
+                        { id: botUser.id, type: 1, allow: allowed.toString(), deny: '0' },
+                        {
+                            id: process.env.MODERATOR_USER_ID,
+                            type: 1,
+                            allow: moderatorAllowed.toString(),
+                            deny: '0',
+                        },
+                    ],
+                }),
+            });
+
+            await discordRequest(`/channels/${ticket.id}/messages`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    content: [
+                        `<@${interaction.member.user.id}> Welcome to your private report ticket.`,
+                        'Describe the issue and use `/report` here to submit the member, details, and screenshot.',
+                        'A moderator will review it. Use the button below to close this ticket when finished.',
+                    ].join('\n'),
+                    components: [{
+                        type: 1,
+                        components: [{
+                            type: 2,
+                            style: 2,
+                            label: 'Close ticket',
+                            custom_id: 'close_report_ticket',
+                        }],
+                    }],
+                    allowed_mentions: { users: [interaction.member.user.id] },
+                }),
+            });
+
+            await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
+                content: `Your private report ticket is ready: <#${ticket.id}>`,
+            });
+        } catch (error) {
+            await logBotError('Ticket creation', error);
+            await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
+                content: `Could not create your ticket: ${error.message || 'unknown error'}. Please contact a moderator.`,
+            }).catch(followupError => console.error('Could not update ticket creation response:', followupError));
+        }
+    })();
+    waitUntil(processing);
+}
+
+async function handleCloseReportTicket(interaction, res) {
+    res.status(200).send({
+        type: 4,
+        data: { content: 'Closing the report ticket…', flags: 64 },
+    });
+
+    const processing = (async () => {
+        try {
+            const channel = await discordRequest(`/channels/${interaction.channel_id}`);
+            const reporterId = channel.topic?.match(/^report-ticket:(\d+)$/)?.[1];
+            const actorId = interaction.member?.user?.id;
+            if (!reporterId) throw new Error('This is not one of the bot-managed report tickets.');
+            if (actorId !== reporterId && actorId !== process.env.MODERATOR_USER_ID) {
+                throw new Error('Only the ticket opener or configured moderator can close this ticket.');
+            }
+
+            await discordRequest(`/channels/${channel.id}/permissions/${reporterId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ type: 1, allow: '0', deny: (1n << 11n).toString() }),
+            });
+            await discordRequest(`/channels/${channel.id}/messages`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    content: 'This ticket is now closed. Contact a moderator if you need further help.',
+                    allowed_mentions: { parse: [] },
+                }),
+            });
+            await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
+                content: `Ticket <#${channel.id}> is closed.`,
+            });
+        } catch (error) {
+            await logBotError('Ticket closure', error);
+            await webhookRequest(interaction.application_id, interaction.token, '/messages/@original', 'PATCH', {
+                content: `Could not close the ticket: ${error.message || 'unknown error'}.`,
+            }).catch(followupError => console.error('Could not update ticket close response:', followupError));
+        }
     })();
     waitUntil(processing);
 }
@@ -508,6 +650,14 @@ export default async function handler(req, res) {
 
         if (interaction.type === 3 && interaction.data.custom_id.startsWith('approve_report:')) {
             return await handleApproval(interaction, res);
+        }
+
+        if (interaction.type === 3 && interaction.data.custom_id === 'open_report_ticket') {
+            return await handleOpenReportTicket(interaction, res);
+        }
+
+        if (interaction.type === 3 && interaction.data.custom_id === 'close_report_ticket') {
+            return await handleCloseReportTicket(interaction, res);
         }
 
         if (interaction.type === 5 && interaction.data.custom_id === 'verify_modal') {
