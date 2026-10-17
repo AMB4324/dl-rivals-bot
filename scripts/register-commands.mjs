@@ -30,6 +30,11 @@ const command = {
         },
     ],
 };
+const aboutCommand = {
+    type: 1,
+    name: 'about',
+    description: 'Show information about DL CLAN BOT',
+};
 
 const headers = {
     authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`,
@@ -40,13 +45,15 @@ if (!listResponse.ok) {
     throw new Error(`Could not read guild commands (${listResponse.status}): ${(await listResponse.text()).slice(0, 500)}`);
 }
 const commands = await listResponse.json();
-const existing = commands.find(item => item.type === 1 && item.name === command.name);
-const response = await fetch(existing ? `${endpoint}/${existing.id}` : endpoint, {
-    method: existing ? 'PATCH' : 'POST',
-    headers,
-    body: JSON.stringify(command),
-});
-if (!response.ok) {
-    throw new Error(`Could not register /report (${response.status}): ${(await response.text()).slice(0, 500)}`);
+for (const item of [command, aboutCommand]) {
+    const existing = commands.find(registered => registered.type === 1 && registered.name === item.name);
+    const response = await fetch(existing ? `${endpoint}/${existing.id}` : endpoint, {
+        method: existing ? 'PATCH' : 'POST',
+        headers,
+        body: JSON.stringify(item),
+    });
+    if (!response.ok) {
+        throw new Error(`Could not register /${item.name} (${response.status}): ${(await response.text()).slice(0, 500)}`);
+    }
 }
-console.log('Registered /report for the configured Discord server. Existing commands were left unchanged.');
+console.log('Registered /report and /about. Other existing commands were left unchanged.');
